@@ -22,57 +22,115 @@
 
 import math
 import struct
+import board
+import busio
+import digitalio
 from displayio import Bitmap, Palette
+import adafruit_sdcard
+import storage
 
-#pylint:disable=line-too-long
+#pylint:disable=line-too-long,broad-except,redefined-outer-name
 
-def _write_bmp_header(f, bitmap, fs):
+def swap_bytes(value):
+    return ((value & 0xFF00) >> 8) | ((value & 0x00FF) << 8)
+
+def _write_bmp_header(f, b, fs):
     f.write(bytes('BM', 'ascii'))
     f.write(struct.pack('<I', fs))
     f.write(b'\00\x00')
     f.write(b'\00\x00')
     f.write(struct.pack('<I', 54))
 
-def _write_dib_header(f, bitmap):
+def _write_dib_header(f, b):
     f.write(struct.pack('<I', 40))
-    f.write(struct.pack('<I', bitmap.width))
-    f.write(struct.pack('<I', bitmap.height))
+    f.write(struct.pack('<I', b.width))
+    f.write(struct.pack('<I', b.height))
     f.write(struct.pack('<H', 1))
-    f.write(struct.pack('<H', bitmap.depth))
+    f.write(struct.pack('<H', 24))
     f.write(b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
 
-def _write_pixels(f, bitmap, palette):
-    bytes_per_row = math.ceil((24 * bitmap.width) / 32) * 4
-    bytes_of_row_padding = (4 - (bytes_per_row % 4) % 4)
+def bytes_per_row(b):
+    pixel_bytes = 3 * b.width #math.ceil((24 * b.width) / 32) * 4
+    padding_bytes = (4 - (pixel_bytes % 4) % 4)
+    return pixel_bytes + padding_bytes
 
-    row_buffer = [0] * (bytes_per_row + bytes_of_row_padding)
-    buffer_index = 0
+def _write_pixels(f, b, p):
+    row_buffer = [0] * bytes_per_row(b)
 
-    for y in range(bitmap.height, 0, -1):
-        for x in range(bitmap.width):
-            pixel = bitmap[x][y-1]
-            pixel_bytes = struct.pack('<I', palette[pixel])
-            for byte_index in range(3):
-                row_buffer[buffer_index] = pixel_bytes[byte_index]
-                buffer_index += 1
+    for y in range(b.height, 0, -1):
+        buffer_index = 0
+        for x in range(b.width):
+            pixel = b[x, y-1]             # this is an index into the palette
+            color = swap_bytes(p[pixel])  # This is a 16 bit value in r5g6b5 format
+            b5 = (color & 0x001F) << 3    # extract each of the RGB tripple into it's own byte
+            g6 = (color >> 3) & 0x00FC
+            r5 = (color >> 8) & 0x00F8
+            row_buffer[buffer_index] = b5
+            buffer_index += 1
+            row_buffer[buffer_index] = g6
+            buffer_index += 1
+            row_buffer[buffer_index] = r5
+            buffer_index += 1
         f.write(bytes(row_buffer))
 
-def save_bitmap(bitmap, palette, file_or_filename):
-    if not isinstance(bitmap, Bitmap):
-        raise ValueError
-    if not isinstance(palette, Palette):
-        raise ValueError
+def save_bitmap(b, p, file_or_filename):
+    if not isinstance(b, Bitmap):
+        raise ValueError('bitmap')
+    if not isinstance(p, Palette):
+        raise ValueError('palette')
     try:
         if isinstance(file_or_filename, str):
             f = open(file_or_filename, 'wb')
         else:
             f = file_or_filename
 
-        filesize = 0
-        _write_bmp_header(f, bitmap, filesize)
-        _write_dib_header(f, bitmap)
-        _write_pixels(f, bitmap, palette)
-    except OSError:
-        print('Cannot open ', file_or_filename)
+        filesize = 54 + bitmap.height * bytes_per_row(bitmap)
+        _write_bmp_header(f, b, filesize)
+        _write_dib_header(f, b)
+        _write_pixels(f, b, p)
+    except Exception:
+        print('Error saving bitmap')
+        raise
     else:
         f.close()
+
+
+print('Setting up SD card')
+spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
+cs = digitalio.DigitalInOut(board.SD_CS)
+sdcard = adafruit_sdcard.SDCard(spi, cs)
+vfs = storage.VfsFat(sdcard)
+storage.mount(vfs, "/sd")
+
+
+WHITE = 0xFFFFFF
+BLACK = 0x000000
+RED = 0xFF0000
+ORANGE = 0xFFA500
+YELLOW = 0xFFFF00
+GREEN = 0x00FF00
+BLUE = 0x0000FF
+PURPLE = 0x800080
+PINK = 0xFFC0CB
+
+colors = (BLACK, RED, ORANGE, YELLOW, GREEN, BLUE, PURPLE, WHITE)
+
+print('Building sample bitmap and palette')
+bitmap = Bitmap(16, 16, 9)
+palette = Palette(len(colors))
+for i, c in enumerate(colors):
+    palette[i] = c
+
+for x in range(16):
+    for y in range(16):
+        if x == 0 or y == 0 or x == 15 or y == 15:
+            bitmap[x, y] = 1
+        elif x == y:
+            bitmap[x, y] = 4
+        elif x == 15 - y:
+            bitmap[x, y] = 5
+        else:
+            bitmap[x,y] = 0
+
+print('Saving bitmap')
+save_bitmap(bitmap, palette, '/sd/test.bmp')
